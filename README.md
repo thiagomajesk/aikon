@@ -17,6 +17,8 @@ Aikon is built for game creators and hobbyists who want a local icon lab.
 - Browse a local Game Icons catalog with search.
 - Compose layered icons with live visual feedback.
 - Tweak style controls for foreground and background.
+- Export icons as SVG, PNG, JPEG, WebP, and GIF.
+- Export animated icons as WebP, GIF, WebM, or MP4 when animation is configured.
 - Keep per-icon edit history in browser local storage.
 - Work offline against local icon files.
 - Sync/download icon assets when you decide to refresh local data.
@@ -60,11 +62,13 @@ Open `http://localhost:5173`.
 ## Project Structure
 
 - `src/core`: domain models, editor state, and icon services
+- `src/core/export`: export pipeline and file generation helpers
 - `src/hooks`: UI orchestration hooks
 - `src/ui`: editor UI components and panels
 - `scripts`: icon sync/download scripts
 - `public/icons`: local icon assets
 - `public/icons.lock.json`: local icon metadata lock
+- `docs/export.md`: export formats, behavior, and caveats
 
 ## Data and Assets
 

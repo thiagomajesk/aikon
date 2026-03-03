@@ -125,6 +125,7 @@ Outside callers **import only from the context entrypoint**, never from internal
 We document contexts and boundaries here, not individual files.
 
 - `editor/`: Owns editor state and editing behavior, including current selection, style state, animation state, and icon settings persistence.
+- `export/`: Owns icon export behavior, including format support, animation frame rendering, and file download helpers.
 - `svg-compositor/`: Owns SVG composition and rendering behavior, including parsing, layering, path breakout and styling, and final SVG assembly for previews.
 - `icon-catalog/`: Owns icon catalog retrieval and querying, including lock-file loading, pagination/filtering, icon SVG fetching, and catalog stats.
 - `navigation/`: Owns app route parsing/building and URL-to-domain mapping.
