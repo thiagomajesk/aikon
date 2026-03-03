@@ -674,7 +674,11 @@ export function buildCompositeSvg(
   foreground: ForegroundStyleState | null,
   parsedCache: Map<string, ParsedSvg>,
   animationProgress: number | null,
+  options: {
+    surfaceForeground?: ForegroundStyleState | null;
+  } = {},
 ): string {
+  const foregroundSurface = options.surfaceForeground ?? foreground;
   // Keep ids stable per render so outputs are predictable and test-friendly.
   const defs: string[] = [];
   let foregroundGradientCounter = 0;
@@ -705,7 +709,7 @@ export function buildCompositeSvg(
     effects.shadowBlur !== 0 || effects.shadowX !== 0 || effects.shadowY !== 0
       ? `drop-shadow(${effects.shadowX}px ${effects.shadowY}px ${effects.shadowBlur}px ${effects.shadowColor})`
       : null;
-  const foregroundShadowFilter = buildSurfaceShadowFilter(foreground);
+  const foregroundShadowFilter = buildSurfaceShadowFilter(foregroundSurface);
   const filterParts: string[] = [];
 
   if (foregroundShadowFilter) {
@@ -725,16 +729,18 @@ export function buildCompositeSvg(
   }
 
   const filter = filterParts.join(" ");
-  const foregroundBlendStyle = buildSurfaceBlendStyle(foreground);
+  const foregroundBlendStyle = buildSurfaceBlendStyle(foregroundSurface);
   const foregroundInnerShadowDef =
-    foreground && foreground.shadowEnabled && foreground.shadowMode === "inner"
-      ? buildInnerShadowFilterDef("fg-inner-shadow", foreground)
+    foregroundSurface &&
+    foregroundSurface.shadowEnabled &&
+    foregroundSurface.shadowMode === "inner"
+      ? buildInnerShadowFilterDef("fg-inner-shadow", foregroundSurface)
       : null;
   if (foregroundInnerShadowDef) {
     defs.push(foregroundInnerShadowDef);
   }
 
-  const clipPathAttr = foreground?.clipToBackground
+  const clipPathAttr = foregroundSurface?.clipToBackground
     ? ` clip-path="url(#bg-clip)"`
     : "";
   const layerMarkup = foregroundInnerShadowDef
@@ -747,10 +753,9 @@ export function buildCompositeSvg(
   if (foregroundBlendStyle) {
     layerStyleParts.push(foregroundBlendStyle);
   }
-  const layerContent = layerStyleParts.length
-    ? `<g style="${layerStyleParts.join("")}">${layerMarkup}</g>`
-    : layerMarkup;
-  const foregroundRootMarkup = `<g data-foreground-root="true">${layerContent}</g>`;
+  const foregroundRootStyleAttr =
+    layerStyleParts.length > 0 ? ` style="${layerStyleParts.join("")}"` : "";
+  const foregroundRootMarkup = `<g data-foreground-root="true"${foregroundRootStyleAttr}>${layerMarkup}</g>`;
 
   return `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" style="isolation:isolate;">

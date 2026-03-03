@@ -632,6 +632,7 @@ export default function App({
     const effectiveForeground = hasSelection
       ? foregroundForComposite
       : null;
+    const effectiveForegroundSurface = hasSelection ? foreground : null;
 
     return buildCompositeSvg(
       baseForComposite,
@@ -642,11 +643,15 @@ export default function App({
       effectiveForeground,
       parsedSvgCacheRef.current,
       null,
+      {
+        surfaceForeground: effectiveForegroundSurface,
+      },
     );
   }, [
     background,
     base.path,
     baseForComposite,
+    foreground,
     foregroundForComposite,
     overlay,
   ]);

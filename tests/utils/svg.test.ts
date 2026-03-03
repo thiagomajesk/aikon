@@ -463,7 +463,10 @@ test("buildCompositeSvg composes foreground inner shadow with CSS filter chain",
   );
 
   assert.match(composite, /<filter id="fg-inner-shadow"/);
-  assert.match(composite, /<g style="filter:[^"]*drop-shadow\(4px -2px 6px #123456\)/);
+  assert.match(
+    composite,
+    /<g data-foreground-root="true" style="filter:[^"]*drop-shadow\(4px -2px 6px #123456\)/,
+  );
   assert.match(composite, /<g filter="url\(#fg-inner-shadow\)">/);
 });
 
@@ -490,6 +493,10 @@ test("buildCompositeSvg applies foreground blend mode and opacity", () => {
   );
 
   assert.match(composite, /<svg[^>]*style="isolation:isolate;"/);
+  assert.match(
+    composite,
+    /<g data-foreground-root="true" style="[^"]*mix-blend-mode:multiply;[^"]*opacity:0.35;/,
+  );
   assert.match(composite, /mix-blend-mode:multiply;/);
   assert.match(composite, /opacity:0.35;/);
 });
