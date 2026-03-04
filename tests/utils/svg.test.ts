@@ -77,6 +77,52 @@ test("buildCompositeSvg creates deterministic output for the same inputs", () =>
   assert.match(first, /fill="#112233"/);
 });
 
+test("buildCompositeSvg supports namespaced ids for isolated inline previews", () => {
+  const base = {
+    ...defaultBaseLayer,
+    path: "preview.svg",
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="#000" d="M20 20L120 20L70 140Z"/></svg>`,
+  };
+
+  const output = buildCompositeSvg(
+    base,
+    defaultOverlayLayer,
+    defaultEffects,
+    defaultAnimation,
+    {
+      ...defaultBackground,
+      type: "gradient",
+      gradientType: "horizontal",
+      gradientFrom: "#111111",
+      gradientTo: "#222222",
+    },
+    {
+      ...defaultForeground,
+      clipToBackground: true,
+      shadowEnabled: true,
+      shadowMode: "inner",
+      shadowBlur: 8,
+      shadowOffsetX: 2,
+      shadowOffsetY: 3,
+      type: "gradient",
+      gradientType: "vertical",
+    },
+    new Map(),
+    null,
+    {
+      svgIdPrefix: "preset-abc",
+    },
+  );
+
+  assert.match(output, /id="preset-abc-bg-gradient"/);
+  assert.match(output, /id="preset-abc-bg-clip"/);
+  assert.match(output, /id="preset-abc-fg-inner-shadow"/);
+  assert.match(output, /clip-path="url\(#preset-abc-bg-clip\)"/);
+  assert.match(output, /id="preset-abc-fg-gradient-1"/);
+  assert.equal(output.includes('id="bg-gradient"'), false);
+  assert.equal(output.includes('id="fg-inner-shadow"'), false);
+});
+
 test("parseSvg strips defs and solid black full-canvas backgrounds", () => {
   const source = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 20"><defs><linearGradient id="x" /></defs><path fill="#000" d="M0 0 h10 v20 H0 z"/><rect fill="black" x="0" y="0" width="10" height="20"/><circle id="keep" cx="5" cy="5" r="3" fill="#ff0000"/></svg>`;
   const parsed = parseSvg(source, new Map());

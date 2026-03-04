@@ -12,10 +12,8 @@ import {
   isDefaultAnimationClipState,
   normalizeAnimationClipState,
 } from "./animation-clip";
+import { ICON_HISTORY_STORE, openEditorDb } from "./storage-db";
 
-const DB_NAME = "aikon-editor";
-const DB_VERSION = 2;
-const ICON_HISTORY_STORE = "icon-history";
 const MAX_RECENT_ICON_ACCESSES = 100;
 export const ICON_HISTORY_UPDATED_EVENT = "icon-history-updated";
 export const ICON_ACCESSES_UPDATED_EVENT = "icon-accesses-updated";
@@ -56,8 +54,6 @@ export interface IconHistoryEntry {
 }
 
 const recordsCache = new Map<string, StoredIconRecord>();
-
-let dbPromise: Promise<IDBDatabase> | null = null;
 let hydrationPromise: Promise<void> | null = null;
 let hydrated = false;
 
@@ -178,41 +174,8 @@ function sortByMostRecent(records: StoredIconRecord[]): StoredIconRecord[] {
   });
 }
 
-function openIconHistoryDb(): Promise<IDBDatabase> {
-  if (typeof indexedDB === "undefined") {
-    return Promise.reject(new Error("IndexedDB is unavailable in this environment."));
-  }
-
-  if (dbPromise) {
-    return dbPromise;
-  }
-
-  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-    request.onupgradeneeded = () => {
-      const database = request.result;
-      if (!database.objectStoreNames.contains(ICON_HISTORY_STORE)) {
-        database.createObjectStore(ICON_HISTORY_STORE, {
-          keyPath: "iconName",
-        });
-      }
-    };
-
-    request.onsuccess = () => {
-      resolve(request.result);
-    };
-
-    request.onerror = () => {
-      reject(request.error ?? new Error("Failed to open IndexedDB."));
-    };
-  });
-
-  return dbPromise;
-}
-
 async function readAllStoredRecords(): Promise<StoredIconRecord[]> {
-  const database = await openIconHistoryDb();
+  const database = await openEditorDb();
   return await new Promise<StoredIconRecord[]>((resolve, reject) => {
     const transaction = database.transaction(ICON_HISTORY_STORE, "readonly");
     const store = transaction.objectStore(ICON_HISTORY_STORE);
@@ -257,7 +220,7 @@ async function readAllStoredRecords(): Promise<StoredIconRecord[]> {
 }
 
 async function putStoredRecord(record: StoredIconRecord): Promise<void> {
-  const database = await openIconHistoryDb();
+  const database = await openEditorDb();
   await new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(ICON_HISTORY_STORE, "readwrite");
     const store = transaction.objectStore(ICON_HISTORY_STORE);
@@ -274,7 +237,7 @@ async function putStoredRecord(record: StoredIconRecord): Promise<void> {
 }
 
 async function deleteStoredRecord(iconName: string): Promise<void> {
-  const database = await openIconHistoryDb();
+  const database = await openEditorDb();
   await new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(ICON_HISTORY_STORE, "readwrite");
     const store = transaction.objectStore(ICON_HISTORY_STORE);
@@ -291,7 +254,7 @@ async function deleteStoredRecord(iconName: string): Promise<void> {
 }
 
 async function clearStoredRecords(): Promise<void> {
-  const database = await openIconHistoryDb();
+  const database = await openEditorDb();
   await new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(ICON_HISTORY_STORE, "readwrite");
     const store = transaction.objectStore(ICON_HISTORY_STORE);

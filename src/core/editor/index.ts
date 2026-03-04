@@ -80,3 +80,21 @@ export {
   loadRecentIconAccesses,
   saveRecentIconAccess,
 } from "./icon-history";
+
+export {
+  ICON_PRESETS_UPDATED_EVENT,
+  PRESET_COLOR_FIELD_KEYS,
+  applyPresetColorsToPathStyles,
+  applyPresetColorsToSurface,
+  clearColorPresets,
+  createColorPresetSnapshot,
+  loadColorPresets,
+  markColorPresetUsed,
+  saveColorPreset,
+} from "./color-presets";
+export type {
+  ColorPreset,
+  ColorPresetSnapshot,
+  PresetColorFieldKey,
+  PresetColorFields,
+} from "./color-presets";

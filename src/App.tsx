@@ -5,6 +5,8 @@ import { IconAdjustmentsHorizontal, IconEye } from "@tabler/icons-react";
 import { IconLibrarySidebar } from "./ui/IconLibrarySidebar";
 import { PreviewPanel } from "./ui/PreviewPanel";
 import {
+  applyPresetColorsToPathStyles,
+  applyPresetColorsToSurface,
   defaultAnimation,
   defaultAnimationClip,
   defaultEffects,
@@ -17,6 +19,7 @@ import type {
   AnimationClipConfig,
   AnimationClipState,
   AnimationPathSettings,
+  ColorPreset,
   ForegroundPathSettings,
   ForegroundStyleState,
   ParsedSvg,
@@ -1108,6 +1111,43 @@ export default function App({
     ],
   );
 
+  const applyColorPreset = useCallback(
+    (preset: ColorPreset) => {
+      if (!selectedIconPath) {
+        return;
+      }
+
+      setBackground(applyPresetColorsToSurface(background, preset.background));
+      const nextForeground = applyPresetColorsToSurface(foreground, preset.foreground);
+      setForeground(nextForeground);
+      setForegroundPathEditors((previous) => {
+        const current = previous[selectedIconPath];
+        if (!current?.enabled) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          [selectedIconPath]: {
+            ...current,
+            pathStyles: applyPresetColorsToPathStyles(
+              current.pathStyles,
+              preset.foreground,
+            ),
+          },
+        };
+      });
+    },
+    [
+      background,
+      foreground,
+      selectedIconPath,
+      setBackground,
+      setForeground,
+      setForegroundPathEditors,
+    ],
+  );
+
   const isCompactLayout = useMediaQuery(
     `(max-width: ${COMPACT_LAYOUT_MAX_WIDTH}px)`,
   ) ?? false;
@@ -1190,6 +1230,9 @@ export default function App({
       selectedIconExternalUrl={selectedIconMetadata?.externalUrl ?? null}
       animationClip={animationClip}
       pathAnimationClips={activePathAnimationClips}
+      backgroundStyle={background}
+      foregroundStyle={foreground}
+      onApplyColorPreset={applyColorPreset}
     />
   );
 

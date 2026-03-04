@@ -537,6 +537,27 @@ function buildBackgroundMarkup(background: BackgroundStyleState): {
   shape: string;
   clipPath: string;
 } {
+  return buildBackgroundMarkupWithIds(background, {
+    bgClipId: "bg-clip",
+    bgGradientId: "bg-gradient",
+    bgInnerShadowId: "bg-inner-shadow",
+  });
+}
+
+interface BackgroundRenderIds {
+  bgClipId: string;
+  bgGradientId: string;
+  bgInnerShadowId: string;
+}
+
+function buildBackgroundMarkupWithIds(
+  background: BackgroundStyleState,
+  ids: BackgroundRenderIds,
+): {
+  defs: string;
+  shape: string;
+  clipPath: string;
+} {
   const gradientConfig: Record<
     BackgroundStyleState["gradientType"],
     { x1: string; y1: string; x2: string; y2: string; radial?: boolean }
@@ -559,9 +580,9 @@ function buildBackgroundMarkup(background: BackgroundStyleState): {
     background.frameRotate,
     background.frameScale
   );
-  const clipPath = `<clipPath id="bg-clip">${clipPathShape}</clipPath>`;
+  const clipPath = `<clipPath id="${ids.bgClipId}">${clipPathShape}</clipPath>`;
   const backgroundShadowFilter = buildSurfaceShadowFilter(background);
-  const innerShadowFilterDef = buildInnerShadowFilterDef("bg-inner-shadow", background);
+  const innerShadowFilterDef = buildInnerShadowFilterDef(ids.bgInnerShadowId, background);
 
   if (background.type === "none") {
     if (!hasFrame) {
@@ -588,7 +609,7 @@ function buildBackgroundMarkup(background: BackgroundStyleState): {
     if (innerShadowFilterDef) {
       shape = shape.replace(
         /^<([a-z]+)/,
-        `<$1 filter="url(#bg-inner-shadow)"`,
+        `<$1 filter="url(#${ids.bgInnerShadowId})"`,
       );
     }
 
@@ -619,7 +640,7 @@ function buildBackgroundMarkup(background: BackgroundStyleState): {
     if (innerShadowFilterDef) {
       shape = shape.replace(
         /^<([a-z]+)/,
-        `<$1 filter="url(#bg-inner-shadow)"`,
+        `<$1 filter="url(#${ids.bgInnerShadowId})"`,
       );
     }
 
@@ -632,8 +653,8 @@ function buildBackgroundMarkup(background: BackgroundStyleState): {
 
   const config = gradientConfig[background.gradientType];
   const gradientDef = config.radial
-    ? `<radialGradient id="bg-gradient" cx="50%" cy="50%" r="70%"><stop offset="0%" stop-color="${background.gradientFrom}" /><stop offset="100%" stop-color="${background.gradientTo}" /></radialGradient>`
-    : `<linearGradient id="bg-gradient" x1="${config.x1}" y1="${config.y1}" x2="${config.x2}" y2="${config.y2}"><stop offset="0%" stop-color="${background.gradientFrom}" /><stop offset="100%" stop-color="${background.gradientTo}" /></linearGradient>`;
+    ? `<radialGradient id="${ids.bgGradientId}" cx="50%" cy="50%" r="70%"><stop offset="0%" stop-color="${background.gradientFrom}" /><stop offset="100%" stop-color="${background.gradientTo}" /></radialGradient>`
+    : `<linearGradient id="${ids.bgGradientId}" x1="${config.x1}" y1="${config.y1}" x2="${config.x2}" y2="${config.y2}"><stop offset="0%" stop-color="${background.gradientFrom}" /><stop offset="100%" stop-color="${background.gradientTo}" /></linearGradient>`;
 
   let defs = gradientDef + clipPath;
   if (innerShadowFilterDef) {
@@ -642,7 +663,7 @@ function buildBackgroundMarkup(background: BackgroundStyleState): {
 
   let shape = buildShapeElement(
     background.shape,
-    "url(#bg-gradient)",
+    `url(#${ids.bgGradientId})`,
     strokeColor,
     strokeWidth,
     strokeStyle,
@@ -654,7 +675,7 @@ function buildBackgroundMarkup(background: BackgroundStyleState): {
   if (innerShadowFilterDef) {
     shape = shape.replace(
       /^<([a-z]+)/,
-      `<$1 filter="url(#bg-inner-shadow)"`,
+      `<$1 filter="url(#${ids.bgInnerShadowId})"`,
     );
   }
 
@@ -676,15 +697,19 @@ export function buildCompositeSvg(
   animationProgress: number | null,
   options: {
     surfaceForeground?: ForegroundStyleState | null;
+    svgIdPrefix?: string;
   } = {},
 ): string {
   const foregroundSurface = options.surfaceForeground ?? foreground;
+  const idPrefix = options.svgIdPrefix?.trim() || null;
   // Keep ids stable per render so outputs are predictable and test-friendly.
   const defs: string[] = [];
   let foregroundGradientCounter = 0;
   const nextGradientId = () => {
     foregroundGradientCounter += 1;
-    return `fg-gradient-${foregroundGradientCounter}`;
+    return idPrefix
+      ? `${idPrefix}-fg-gradient-${foregroundGradientCounter}`
+      : `fg-gradient-${foregroundGradientCounter}`;
   };
   const baseMarkup = buildLayerMarkup(
     base,
@@ -700,7 +725,13 @@ export function buildCompositeSvg(
     defs,
     nextGradientId,
   );
-  const backgroundMarkup = buildBackgroundMarkup(background);
+  const backgroundMarkup = idPrefix
+    ? buildBackgroundMarkupWithIds(background, {
+        bgClipId: `${idPrefix}-bg-clip`,
+        bgGradientId: `${idPrefix}-bg-gradient`,
+        bgInnerShadowId: `${idPrefix}-bg-inner-shadow`,
+      })
+    : buildBackgroundMarkup(background);
   const wrapperTransform =
     animationProgress === null
       ? ""
@@ -730,21 +761,24 @@ export function buildCompositeSvg(
 
   const filter = filterParts.join(" ");
   const foregroundBlendStyle = buildSurfaceBlendStyle(foregroundSurface);
+  const foregroundInnerShadowId = idPrefix
+    ? `${idPrefix}-fg-inner-shadow`
+    : "fg-inner-shadow";
   const foregroundInnerShadowDef =
     foregroundSurface &&
     foregroundSurface.shadowEnabled &&
     foregroundSurface.shadowMode === "inner"
-      ? buildInnerShadowFilterDef("fg-inner-shadow", foregroundSurface)
+      ? buildInnerShadowFilterDef(foregroundInnerShadowId, foregroundSurface)
       : null;
   if (foregroundInnerShadowDef) {
     defs.push(foregroundInnerShadowDef);
   }
 
   const clipPathAttr = foregroundSurface?.clipToBackground
-    ? ` clip-path="url(#bg-clip)"`
+    ? ` clip-path="url(#${idPrefix ? `${idPrefix}-bg-clip` : "bg-clip"})"`
     : "";
   const layerMarkup = foregroundInnerShadowDef
-    ? `<g filter="url(#fg-inner-shadow)">${baseMarkup}${overlayMarkup}</g>`
+    ? `<g filter="url(#${foregroundInnerShadowId})">${baseMarkup}${overlayMarkup}</g>`
     : `${baseMarkup}${overlayMarkup}`;
   const layerStyleParts: string[] = [];
   if (filter) {

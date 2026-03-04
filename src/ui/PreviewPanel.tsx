@@ -17,6 +17,7 @@ import {
   Tabs,
   Text,
   TextInput,
+  Tooltip,
 } from "@mantine/core";
 import {
   IconAlertTriangle,
@@ -25,20 +26,32 @@ import {
   IconFileExport,
   IconHistory,
   IconInfoCircle,
+  IconPalette,
   IconSearch,
   IconTemplate,
 } from "@tabler/icons-react";
 import {
+  ICON_PRESETS_UPDATED_EVENT,
   ICON_HISTORY_UPDATED_EVENT,
+  PRESET_COLOR_FIELD_KEYS,
+  createColorPresetSnapshot,
+  loadColorPresets,
   loadIconHistoryEntries,
+  markColorPresetUsed,
+  saveColorPreset,
   defaultAnimation,
   defaultBaseLayer,
+  defaultBackground,
   defaultEffects,
+  defaultForeground,
   defaultOverlayLayer,
 } from "../core/editor";
 import type {
   AnimationClipState,
+  BackgroundStyleState,
+  ColorPreset,
   CustomIcon,
+  ForegroundStyleState,
   IconHistoryEntry,
   LayerState,
   ParsedSvg,
@@ -85,6 +98,9 @@ interface PreviewPanelProps {
   selectedIconExternalUrl: string | null;
   animationClip: AnimationClipState;
   pathAnimationClips?: Record<string, AnimationClipState>;
+  backgroundStyle: BackgroundStyleState;
+  foregroundStyle: ForegroundStyleState;
+  onApplyColorPreset: (preset: ColorPreset) => void;
 }
 
 interface HistoryIconRef {
@@ -98,6 +114,11 @@ interface HistoryItem {
   name: string;
   path: string;
   compositeSvg: string;
+}
+
+interface PresetPreviewIconRef {
+  name: string;
+  path: string;
 }
 
 interface ExportDraft {
@@ -129,6 +150,11 @@ const ANIMATED_EXPORT_FORMAT_OPTIONS: Array<{ value: ExportFormat; label: string
 const FPS_PRESET_VALUES = [15, 20, 30, 60] as const;
 const EXPORT_SIZE_PRESETS = [32, 64, 128, 256, 512] as const;
 const TOOLBAR_INSET = 10;
+const toSvgIdPrefix = (value: string): string => {
+  const cleaned = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+  const collapsed = cleaned.replace(/-+/g, "-").replace(/^-|-$/g, "");
+  return collapsed ? `pv-${collapsed}` : "pv-item";
+};
 
 export const PreviewPanel: React.FC<PreviewPanelProps> = ({
   compositeSvg,
@@ -146,12 +172,27 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
   selectedIconExternalUrl,
   animationClip,
   pathAnimationClips,
+  backgroundStyle,
+  foregroundStyle,
+  onApplyColorPreset,
 }) => {
   const [activeTab, setActiveTab] = useState<string | null>("history");
   const [iconSvgs, setIconSvgs] = useState<Record<string, string>>({});
   const [historyRevision, setHistoryRevision] = useState(0);
+  const [presetRevision, setPresetRevision] = useState(0);
+  const [presetPreviewIcons, setPresetPreviewIcons] = useState<
+    Record<string, PresetPreviewIconRef>
+  >({});
+  const [presetPreviewSvgs, setPresetPreviewSvgs] = useState<Record<string, string>>({});
   const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
   const [historySearchQuery, setHistorySearchQuery] = useState("");
+  const [presetSearchQuery, setPresetSearchQuery] = useState("");
+  const [isSavePresetModalOpen, setIsSavePresetModalOpen] = useState(false);
+  const [presetNameDraft, setPresetNameDraft] = useState("");
+  const [presetSaveError, setPresetSaveError] = useState<string | null>(null);
+  const [pendingPresetToApply, setPendingPresetToApply] = useState<ColorPreset | null>(
+    null,
+  );
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
@@ -190,6 +231,17 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
     window.addEventListener(ICON_HISTORY_UPDATED_EVENT, handleHistoryUpdated);
     return () => {
       window.removeEventListener(ICON_HISTORY_UPDATED_EVENT, handleHistoryUpdated);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handlePresetsUpdated = (): void => {
+      setPresetRevision((current) => current + 1);
+    };
+
+    window.addEventListener(ICON_PRESETS_UPDATED_EVENT, handlePresetsUpdated);
+    return () => {
+      window.removeEventListener(ICON_PRESETS_UPDATED_EVENT, handlePresetsUpdated);
     };
   }, []);
 
@@ -296,6 +348,9 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
         styledForeground.foregroundForComposite,
         parsedCache,
         null,
+        {
+          svgIdPrefix: toSvgIdPrefix(`history-${item.name}`),
+        },
       );
 
       return [
@@ -325,6 +380,159 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
   const collapsedHistoryItems = useMemo(() => {
     return filteredHistoryItems.slice(0, 10);
   }, [filteredHistoryItems]);
+  const colorPresets = useMemo(() => {
+    return loadColorPresets();
+  }, [presetRevision]);
+  const filteredPresets = useMemo(() => {
+    const query = presetSearchQuery.trim().toLowerCase();
+    if (!query) {
+      return colorPresets;
+    }
+
+    return colorPresets.filter((preset) => {
+      return preset.name.toLowerCase().includes(query);
+    });
+  }, [colorPresets, presetSearchQuery]);
+  const collapsedPresets = useMemo(() => {
+    return filteredPresets.slice(0, 10);
+  }, [filteredPresets]);
+
+  useEffect(() => {
+    if (colorPresets.length === 0 || iconCatalog.length === 0) {
+      return;
+    }
+
+    setPresetPreviewIcons((previous) => {
+      let hasChanges = false;
+      const next: Record<string, PresetPreviewIconRef> = {};
+      const availableByPath = new Map(iconCatalog.map((icon) => [icon.path, icon]));
+
+      for (const preset of colorPresets) {
+        const existing = previous[preset.id];
+        if (existing && availableByPath.has(existing.path)) {
+          next[preset.id] = existing;
+          continue;
+        }
+
+        const randomIcon =
+          iconCatalog[Math.floor(Math.random() * iconCatalog.length)] ?? null;
+        if (!randomIcon) {
+          continue;
+        }
+
+        next[preset.id] = {
+          name: randomIcon.name,
+          path: randomIcon.path,
+        };
+        hasChanges = true;
+      }
+
+      const previousIds = Object.keys(previous);
+      if (!hasChanges && previousIds.length !== Object.keys(next).length) {
+        hasChanges = true;
+      }
+
+      return hasChanges ? next : previous;
+    });
+  }, [colorPresets, iconCatalog]);
+
+  useEffect(() => {
+    const assignedPaths = Array.from(
+      new Set(Object.values(presetPreviewIcons).map((icon) => icon.path)),
+    );
+    const pathsToFetch = assignedPaths.filter((path) => !presetPreviewSvgs[path]);
+    if (pathsToFetch.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const fetchPresetSvgs = async (): Promise<void> => {
+      const loaded: Record<string, string> = {};
+      await Promise.all(
+        pathsToFetch.map(async (path) => {
+          try {
+            loaded[path] = await fetchLocalIconSvg(path);
+          } catch {
+            // Ignore preview fetch errors to keep presets UI responsive.
+          }
+        }),
+      );
+
+      if (cancelled || Object.keys(loaded).length === 0) {
+        return;
+      }
+
+      setPresetPreviewSvgs((previous) => ({
+        ...previous,
+        ...loaded,
+      }));
+    };
+
+    void fetchPresetSvgs();
+    return () => {
+      cancelled = true;
+    };
+  }, [presetPreviewIcons, presetPreviewSvgs]);
+
+  const presetPreviewById = useMemo(() => {
+    const parsedCache = new Map<string, ParsedSvg>();
+    const breakoutCache = new Map<string, ParsedSvgBreakout>();
+    const result = new Map<string, string>();
+
+    for (const preset of colorPresets) {
+      const iconRef = presetPreviewIcons[preset.id];
+      if (!iconRef) {
+        continue;
+      }
+
+      const svg = presetPreviewSvgs[iconRef.path];
+      if (!svg) {
+        continue;
+      }
+
+      const presetBackground: BackgroundStyleState = {
+        ...defaultBackground,
+        ...preset.background,
+      };
+      const presetForeground: ForegroundStyleState = {
+        ...defaultForeground,
+        ...preset.foreground,
+      };
+
+      const styledForeground = buildForegroundComposite({
+        svg,
+        foreground: presetForeground,
+        pathConfig: null,
+        parsedSvgCache: parsedCache,
+        breakoutCache,
+      });
+
+      const baseLayer: LayerState = {
+        ...defaultBaseLayer,
+        path: iconRef.path,
+        svg: styledForeground.svg,
+      };
+
+      const composite = buildCompositeSvg(
+        baseLayer,
+        defaultOverlayLayer,
+        defaultEffects,
+        defaultAnimation,
+        presetBackground,
+        styledForeground.foregroundForComposite,
+        parsedCache,
+        null,
+        {
+          svgIdPrefix: toSvgIdPrefix(`preset-${preset.id}`),
+        },
+      );
+
+      result.set(preset.id, composite);
+    }
+
+    return result;
+  }, [colorPresets, presetPreviewIcons, presetPreviewSvgs]);
 
   const hasIconInfo = Boolean(
     selectedIconName ||
@@ -334,6 +542,78 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
       selectedIconTags.length > 0,
   );
   const hasSelectedIcon = Boolean(selectedIconName);
+  const shouldConfirmPresetApply = useMemo(() => {
+    if (!hasSelectedIcon) {
+      return false;
+    }
+
+    return PRESET_COLOR_FIELD_KEYS.some((key) => {
+      return (
+        backgroundStyle[key] !== defaultBackground[key] ||
+        foregroundStyle[key] !== defaultForeground[key]
+      );
+    });
+  }, [backgroundStyle, foregroundStyle, hasSelectedIcon]);
+
+  const applyPreset = (preset: ColorPreset): void => {
+    if (!hasSelectedIcon) {
+      return;
+    }
+
+    onApplyColorPreset(preset);
+    markColorPresetUsed(preset.id);
+  };
+
+  const handlePresetSelection = (preset: ColorPreset): void => {
+    if (!hasSelectedIcon) {
+      return;
+    }
+
+    if (shouldConfirmPresetApply) {
+      setPendingPresetToApply(preset);
+      return;
+    }
+
+    applyPreset(preset);
+  };
+
+  const handleSavePreset = (): void => {
+    const snapshot = createColorPresetSnapshot(backgroundStyle, foregroundStyle);
+    const saved = saveColorPreset(presetNameDraft, snapshot);
+    if (!saved) {
+      setPresetSaveError("Please enter a preset name.");
+      return;
+    }
+
+    setPresetSaveError(null);
+    setPresetNameDraft("");
+    setIsSavePresetModalOpen(false);
+  };
+
+  const renderPresetMedia = (preset: ColorPreset): React.ReactNode => {
+    const previewSvg = presetPreviewById.get(preset.id);
+    if (!previewSvg) {
+      return (
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Loader size="sm" color="gray" />
+        </div>
+      );
+    }
+
+    return (
+      <div className="ps-icon-preview-content">
+        <ThreePreview svg={previewSvg} transform={historyPreviewTransform} readOnly />
+      </div>
+    );
+  };
 
   const animationSummary = useMemo(() => {
     return inspectExportAnimation(animationClip, pathAnimationClips ?? {});
@@ -542,14 +822,16 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
               {hasIconInfo ? (
                 <Popover width={360} position="bottom-end" withArrow shadow="md">
                   <Popover.Target>
-                    <ActionIcon
-                      size="xl"
-                      variant="subtle"
-                      color="gray"
-                      aria-label="Open icon info"
-                    >
-                      <IconInfoCircle size={22} />
-                    </ActionIcon>
+                    <Tooltip label="Icon details">
+                      <ActionIcon
+                        size="xl"
+                        variant="subtle"
+                        color="gray"
+                        aria-label="Open icon info"
+                      >
+                        <IconInfoCircle size={22} />
+                      </ActionIcon>
+                    </Tooltip>
                   </Popover.Target>
                   <Popover.Dropdown>
                     <Stack gap={6}>
@@ -589,18 +871,39 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
                 </Popover>
               ) : null}
               {hasSelectedIcon ? (
-                <ActionIcon
-                  size="xl"
-                  variant="subtle"
-                  color="blue"
-                  aria-label="Open export options"
-                  onClick={() => {
-                    setExportError(null);
-                    setIsExportModalOpen(true);
-                  }}
-                >
-                  <IconFileExport size={22} />
-                </ActionIcon>
+                <Tooltip label="Save as preset">
+                  <ActionIcon
+                    size="xl"
+                    variant="subtle"
+                    color="teal"
+                    aria-label="Save colors as preset"
+                    onClick={() => {
+                      setPresetSaveError(null);
+                      setPresetNameDraft(
+                        selectedIconName ? `${selectedIconName} colors` : "New preset",
+                      );
+                      setIsSavePresetModalOpen(true);
+                    }}
+                  >
+                    <IconPalette size={22} />
+                  </ActionIcon>
+                </Tooltip>
+              ) : null}
+              {hasSelectedIcon ? (
+                <Tooltip label="Export icon">
+                  <ActionIcon
+                    size="xl"
+                    variant="subtle"
+                    color="blue"
+                    aria-label="Open export options"
+                    onClick={() => {
+                      setExportError(null);
+                      setIsExportModalOpen(true);
+                    }}
+                  >
+                    <IconFileExport size={22} />
+                  </ActionIcon>
+                </Tooltip>
               ) : null}
             </Group>
           </div>
@@ -682,11 +985,12 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
                     color="gray"
                     size="sm"
                     aria-label={
-                      isHistoryExpanded ? "Collapse history list" : "Expand history list"
+                      isHistoryExpanded ? "Collapse panel list" : "Expand panel list"
                     }
                     onClick={() => {
                       setIsHistoryExpanded((current) => !current);
                       setHistorySearchQuery("");
+                      setPresetSearchQuery("");
                     }}
                   >
                     <IconChevronUp
@@ -833,20 +1137,199 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
               <Tabs.Panel
                 value="presets"
                 style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  minHeight: isHistoryExpanded ? 0 : undefined,
                   flex: isToolbarExpanded ? 1 : undefined,
                   paddingTop: 8,
                   paddingInline: TOOLBAR_INSET,
                   paddingBottom: TOOLBAR_INSET,
                 }}
               >
-                <Text size="sm" c="dimmed">
-                  Presets coming soon...
-                </Text>
+                <Stack
+                  gap="xs"
+                  style={{
+                    minHeight: isHistoryExpanded ? 0 : undefined,
+                    flex: isToolbarExpanded ? 1 : undefined,
+                  }}
+                >
+                  {isHistoryExpanded ? (
+                    <TextInput
+                      placeholder="Search presets"
+                      value={presetSearchQuery}
+                      onChange={(event) => {
+                        setPresetSearchQuery(event.currentTarget.value);
+                      }}
+                      leftSection={<IconSearch size={14} />}
+                    />
+                  ) : null}
+
+                  {(isHistoryExpanded ? filteredPresets : collapsedPresets).length > 0 ? (
+                    isHistoryExpanded ? (
+                      <ScrollArea
+                        type="hover"
+                        scrollbars="y"
+                        offsetScrollbars="present"
+                        style={{
+                          width: "100%",
+                          maxWidth: "100%",
+                          minHeight: 0,
+                          flex: 1,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "repeat(auto-fill, minmax(88px, 1fr))",
+                            gap: 8,
+                            paddingRight: 8,
+                          }}
+                        >
+                          {filteredPresets.map((preset) => (
+                            <IconPreviewTile
+                              key={preset.id}
+                              className="ps-history-preview-tile"
+                              onClick={() => handlePresetSelection(preset)}
+                              title={preset.name}
+                              media={renderPresetMedia(preset)}
+                            />
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    ) : (
+                      <ScrollArea
+                        type="hover"
+                        scrollbars="x"
+                        style={{ width: "100%", maxWidth: "100%" }}
+                        viewportProps={{
+                          style: {
+                            overflowY: "hidden",
+                            touchAction: "pan-x",
+                          },
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "nowrap",
+                            gap: 6,
+                            width: "max-content",
+                            minWidth: "max-content",
+                            scrollSnapType: "x proximity",
+                          }}
+                        >
+                          {collapsedPresets.map((preset) => (
+                            <IconPreviewTile
+                              key={preset.id}
+                              className="ps-history-preview-tile"
+                              onClick={() => handlePresetSelection(preset)}
+                              title={preset.name}
+                              style={{
+                                width: 80,
+                                flex: "0 0 auto",
+                                scrollSnapAlign: "start",
+                              }}
+                              media={renderPresetMedia(preset)}
+                            />
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    )
+                  ) : (
+                    <Text size="sm" c="dimmed">
+                      {presetSearchQuery.trim()
+                        ? "No presets match this search"
+                        : "No saved presets yet"}
+                    </Text>
+                  )}
+                </Stack>
               </Tabs.Panel>
             </Tabs>
           </Paper>
         ) : null}
       </div>
+
+      <Modal
+        opened={isSavePresetModalOpen && hasSelectedIcon}
+        onClose={() => {
+          setPresetSaveError(null);
+          setIsSavePresetModalOpen(false);
+        }}
+        title="New preset"
+        centered
+        withCloseButton={false}
+        closeOnEscape={false}
+        closeOnClickOutside={false}
+      >
+        <Stack gap="sm">
+          <TextInput
+            label="Preset name"
+            value={presetNameDraft}
+            onChange={(event) => {
+              setPresetNameDraft(event.currentTarget.value);
+            }}
+            placeholder="My preset"
+            autoFocus
+          />
+          {presetSaveError ? (
+            <Alert color="red" title="Could not save preset" icon={<IconAlertTriangle size={16} />}>
+              {presetSaveError}
+            </Alert>
+          ) : null}
+          <Group justify="flex-end">
+            <Button
+              variant="default"
+              onClick={() => {
+                setPresetSaveError(null);
+                setIsSavePresetModalOpen(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleSavePreset}>Save</Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={pendingPresetToApply !== null}
+        onClose={() => {
+          setPendingPresetToApply(null);
+        }}
+        title="Apply preset colors?"
+        centered
+        withCloseButton={false}
+        closeOnEscape={false}
+        closeOnClickOutside={false}
+      >
+        <Stack gap="sm">
+          <Text size="sm" c="dimmed">
+            This icon already has custom styles. Applying a preset will override fill,
+            stroke, and shadow settings for background and foreground.
+          </Text>
+          <Group justify="flex-end">
+            <Button
+              variant="default"
+              onClick={() => {
+                setPendingPresetToApply(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              color="blue"
+              onClick={() => {
+                if (pendingPresetToApply) {
+                  applyPreset(pendingPresetToApply);
+                }
+                setPendingPresetToApply(null);
+              }}
+            >
+              Apply
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
 
       <Modal
         opened={isExportModalOpen && hasSelectedIcon}
