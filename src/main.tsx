@@ -18,6 +18,22 @@ const theme = createTheme({
         checkIconPosition: "right",
       },
     },
+    Tooltip: {
+      defaultProps: {
+        withArrow: true,
+      },
+      styles: () => ({
+        tooltip: {
+          backgroundColor: "var(--mantine-color-dark-7)",
+          color: "var(--mantine-color-gray-0)",
+          border: "1px solid var(--mantine-color-dark-4)",
+        },
+        arrow: {
+          backgroundColor: "var(--mantine-color-dark-7)",
+          border: "1px solid var(--mantine-color-dark-4)",
+        },
+      }),
+    },
   },
 });
 
