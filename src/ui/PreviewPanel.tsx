@@ -127,11 +127,7 @@ const ANIMATED_EXPORT_FORMAT_OPTIONS: Array<{ value: ExportFormat; label: string
   { value: "mp4", label: "MP4" },
 ];
 const FPS_PRESET_VALUES = [15, 20, 30, 60] as const;
-const EXPORT_SIZE_PRESETS = [
-  { value: 256, label: "256 x 256 (small)" },
-  { value: 384, label: "384 x 384 (medium)" },
-  { value: 512, label: "512 x 512 (original)" },
-] as const;
+const EXPORT_SIZE_PRESETS = [32, 64, 128, 256, 512] as const;
 const TOOLBAR_INSET = 10;
 
 export const PreviewPanel: React.FC<PreviewPanelProps> = ({
@@ -901,8 +897,8 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
           <Select
             label="Size"
             data={EXPORT_SIZE_PRESETS.map((preset) => ({
-              value: preset.value.toString(),
-              label: preset.label,
+              value: preset.toString(),
+              label: `${preset} x ${preset}`,
             }))}
             value={exportDraft.size.toString()}
             onChange={(value) => {
