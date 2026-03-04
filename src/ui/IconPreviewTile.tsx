@@ -1,5 +1,5 @@
 import React from "react";
-import { UnstyledButton } from "@mantine/core";
+import { Tooltip, UnstyledButton } from "@mantine/core";
 
 interface IconPreviewTileProps {
   ariaLabel?: string;
@@ -33,13 +33,12 @@ export function IconPreviewTile({
     .join(" ");
 
   if (clickTarget === "media") {
-    return (
+    const content = (
       <div className={rootClassName} style={style}>
         <UnstyledButton
           aria-label={ariaLabel}
           className="ps-icon-preview-media ps-icon-preview-media-button"
           onClick={onClick}
-          title={title}
           type={type}
         >
           {media}
@@ -47,19 +46,38 @@ export function IconPreviewTile({
         {label ? <div className="ps-icon-preview-label">{label}</div> : null}
       </div>
     );
+
+    if (!title) {
+      return content;
+    }
+
+    return (
+      <Tooltip label={title} withArrow openDelay={120}>
+        {content}
+      </Tooltip>
+    );
   }
 
-  return (
+  const content = (
     <UnstyledButton
       aria-label={ariaLabel}
       className={rootClassName}
       onClick={onClick}
       style={style}
-      title={title}
       type={type}
     >
       <div className="ps-icon-preview-media">{media}</div>
       {label ? <div className="ps-icon-preview-label">{label}</div> : null}
     </UnstyledButton>
+  );
+
+  if (!title) {
+    return content;
+  }
+
+  return (
+    <Tooltip label={title} withArrow openDelay={120}>
+      {content}
+    </Tooltip>
   );
 }
