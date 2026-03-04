@@ -20,15 +20,17 @@ import {
 } from "@mantine/core";
 import {
   IconAlertTriangle,
+  IconChevronUp,
   IconDownload,
   IconFileExport,
   IconHistory,
   IconInfoCircle,
+  IconSearch,
   IconTemplate,
 } from "@tabler/icons-react";
 import {
   ICON_HISTORY_UPDATED_EVENT,
-  loadIconHistory,
+  loadIconHistoryEntries,
   defaultAnimation,
   defaultBaseLayer,
   defaultEffects,
@@ -37,6 +39,7 @@ import {
 import type {
   AnimationClipState,
   CustomIcon,
+  IconHistoryEntry,
   LayerState,
   ParsedSvg,
   PreviewTransform,
@@ -54,6 +57,10 @@ import {
 } from "../core/export";
 import type { ExportFormat, ExportRequest } from "../core/export";
 import { ThreePreview } from "./ThreePreview";
+import {
+  resolveToolbarExpandedLayout,
+  resolveToolbarGridTemplateRows,
+} from "./preview-toolbar-state";
 import {
   buildCompositeSvg,
   buildForegroundComposite,
@@ -125,6 +132,7 @@ const EXPORT_SIZE_PRESETS = [
   { value: 384, label: "384 x 384 (medium)" },
   { value: 512, label: "512 x 512 (original)" },
 ] as const;
+const TOOLBAR_INSET = 10;
 
 export const PreviewPanel: React.FC<PreviewPanelProps> = ({
   compositeSvg,
@@ -146,6 +154,8 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
   const [activeTab, setActiveTab] = useState<string | null>("history");
   const [iconSvgs, setIconSvgs] = useState<Record<string, string>>({});
   const [historyRevision, setHistoryRevision] = useState(0);
+  const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
+  const [historySearchQuery, setHistorySearchQuery] = useState("");
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
@@ -187,25 +197,29 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
     };
   }, []);
 
+  const historyEntries = useMemo<IconHistoryEntry[]>(() => {
+    return loadIconHistoryEntries();
+  }, [historyRevision]);
+
   const historyIconRefs = useMemo(() => {
-    const history = loadIconHistory();
-    return Object.keys(history).flatMap<HistoryIconRef>((name) => {
-      const icon = iconCatalog.find((item) => item.name === name);
-      const customIcon = customIcons.find((item) => item.name === name);
-      if (!icon && !customIcon) {
+    return historyEntries.flatMap<HistoryIconRef>((entry) => {
+      const icon = iconCatalog.find((item) => item.name === entry.iconName);
+      const customIcon = customIcons.find((item) => item.name === entry.iconName);
+      const resolvedPath = entry.iconPath ?? customIcon?.path ?? icon?.path;
+      if (!resolvedPath) {
         return [];
       }
 
       return [
         {
-          name,
-          path: customIcon?.path ?? icon!.path,
+          name: entry.iconName,
+          path: resolvedPath,
           svg: customIcon?.svg,
-          isCustom: !!customIcon,
+          isCustom: Boolean(customIcon),
         },
       ];
     });
-  }, [iconCatalog, customIcons, historyRevision]);
+  }, [customIcons, historyEntries, iconCatalog]);
 
   useEffect(() => {
     let cancelled = false;
@@ -245,13 +259,15 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
   }, [historyIconRefs, iconSvgs, historyRevision]);
 
   const historyItems = useMemo(() => {
-    const history = loadIconHistory();
+    const settingsByName = new Map(
+      historyEntries.map((entry) => [entry.iconName, entry.settings] as const),
+    );
     const parsedCache = new Map<string, ParsedSvg>();
     const breakoutCache = new Map<string, ParsedSvgBreakout>();
 
     return historyIconRefs.flatMap<HistoryItem>((item) => {
       const svg = item.isCustom ? item.svg : iconSvgs[item.name];
-      const settings = history[item.name];
+      const settings = settingsByName.get(item.name);
       if (!svg || !settings) {
         return [];
       }
@@ -294,7 +310,25 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
         },
       ];
     });
-  }, [historyIconRefs, iconSvgs]);
+  }, [historyEntries, historyIconRefs, iconSvgs]);
+
+  const filteredHistoryItems = useMemo(() => {
+    const query = historySearchQuery.trim().toLowerCase();
+    if (!query) {
+      return historyItems;
+    }
+
+    return historyItems.filter((item) => {
+      return (
+        item.name.toLowerCase().includes(query) ||
+        item.path.toLowerCase().includes(query)
+      );
+    });
+  }, [historyItems, historySearchQuery]);
+
+  const collapsedHistoryItems = useMemo(() => {
+    return filteredHistoryItems.slice(0, 10);
+  }, [filteredHistoryItems]);
 
   const hasIconInfo = Boolean(
     selectedIconName ||
@@ -468,6 +502,7 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
     }
     return closestIndex;
   }, [exportDraft.fps]);
+  const isToolbarExpanded = resolveToolbarExpandedLayout(activeTab, isHistoryExpanded);
 
   return (
     <>
@@ -476,7 +511,9 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
           height: "100%",
           minHeight: 0,
           display: "grid",
-          gridTemplateRows: "minmax(0, 1fr) auto",
+          gridTemplateRows: resolveToolbarGridTemplateRows(isToolbarExpanded),
+          transition: "grid-template-rows 260ms cubic-bezier(0.22, 1, 0.36, 1)",
+          overflow: "hidden",
         }}
       >
         <div
@@ -486,10 +523,15 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            overflow: "auto",
-            padding: "8px 0 12px",
-            gap: 8,
+            overflow: "hidden",
+            padding: isToolbarExpanded ? "0" : "8px 0 12px",
+            gap: isToolbarExpanded ? 0 : 8,
             position: "relative",
+            pointerEvents: isToolbarExpanded ? "none" : "auto",
+            opacity: isToolbarExpanded ? 0 : 1,
+            transform: isToolbarExpanded ? "translateY(18px)" : "translateY(0)",
+            transition:
+              "opacity 180ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1), padding 260ms cubic-bezier(0.22, 1, 0.36, 1), gap 260ms cubic-bezier(0.22, 1, 0.36, 1)",
           }}
         >
           <div
@@ -598,15 +640,34 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
           <Paper
             withBorder
             radius="md"
-            p="xs"
+            p={0}
             style={{
               boxShadow: "0 -10px 24px rgba(0, 0, 0, 0.38)",
               overflow: "hidden",
               minWidth: 0,
+              height: isToolbarExpanded ? "100%" : "auto",
+              display: "flex",
+              flexDirection: "column",
+              transition:
+                "border-radius 260ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 260ms ease",
             }}
           >
-            <Tabs value={activeTab} onChange={setActiveTab}>
-              <Tabs.List>
+            <Tabs
+              value={activeTab}
+              onChange={setActiveTab}
+              style={{
+                height: isToolbarExpanded ? "100%" : undefined,
+                minHeight: 0,
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              <Tabs.List
+                style={{
+                  alignItems: "center",
+                  paddingInline: TOOLBAR_INSET,
+                }}
+              >
                 <Tabs.Tab
                   value="history"
                   leftSection={<IconHistory size={14} stroke={1.8} />}
@@ -619,63 +680,169 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({
                 >
                   Presets
                 </Tabs.Tab>
-              </Tabs.List>
-
-              <Tabs.Panel value="history" pt="xs">
-                {historyItems.length > 0 ? (
-                  <ScrollArea
-                    type="hover"
-                    scrollbars="x"
-                    style={{ width: "100%", maxWidth: "100%" }}
-                    viewportProps={{
-                      style: {
-                        overflowY: "hidden",
-                        touchAction: "pan-x",
-                      },
+                <div style={{ marginInlineStart: "auto" }}>
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    size="sm"
+                    aria-label={
+                      isHistoryExpanded ? "Collapse history list" : "Expand history list"
+                    }
+                    onClick={() => {
+                      setIsHistoryExpanded((current) => !current);
+                      setHistorySearchQuery("");
                     }}
                   >
-                    <div
+                    <IconChevronUp
+                      size={14}
                       style={{
-                        display: "flex",
-                        flexWrap: "nowrap",
-                        gap: 6,
-                        width: "max-content",
-                        minWidth: "max-content",
-                        scrollSnapType: "x proximity",
+                        transform: isHistoryExpanded
+                          ? "rotate(180deg)"
+                          : "rotate(0deg)",
+                        transition: "transform 150ms ease",
                       }}
-                    >
-                      {historyItems.map((item) => (
-                        <IconPreviewTile
-                          key={item.name}
-                          className="ps-history-preview-tile"
-                          onClick={() => onIconSelect(item.path, item.name)}
-                          title={item.name}
+                    />
+                  </ActionIcon>
+                </div>
+              </Tabs.List>
+
+              <Tabs.Panel
+                value="history"
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  minHeight: isToolbarExpanded ? 0 : undefined,
+                  flex: isToolbarExpanded ? 1 : undefined,
+                  paddingTop: 8,
+                  paddingInline: TOOLBAR_INSET,
+                  paddingBottom: TOOLBAR_INSET,
+                }}
+              >
+                <Stack
+                  gap="xs"
+                  style={{
+                    minHeight: isToolbarExpanded ? 0 : undefined,
+                    flex: isToolbarExpanded ? 1 : undefined,
+                  }}
+                >
+                  {isHistoryExpanded ? (
+                    <TextInput
+                      placeholder="Search icon history"
+                      value={historySearchQuery}
+                      onChange={(event) => {
+                        setHistorySearchQuery(event.currentTarget.value);
+                      }}
+                      leftSection={<IconSearch size={14} />}
+                    />
+                  ) : null}
+
+                  {(isHistoryExpanded ? filteredHistoryItems : collapsedHistoryItems).length >
+                  0 ? (
+                    isHistoryExpanded ? (
+                      <ScrollArea
+                        type="hover"
+                        scrollbars="y"
+                        offsetScrollbars="present"
+                        style={{
+                          width: "100%",
+                          maxWidth: "100%",
+                          minHeight: 0,
+                          flex: 1,
+                        }}
+                      >
+                        <div
                           style={{
-                            width: 80,
-                            flex: "0 0 auto",
-                            scrollSnapAlign: "start",
+                            display: "grid",
+                            gridTemplateColumns: "repeat(auto-fill, minmax(88px, 1fr))",
+                            gap: 8,
+                            paddingRight: 8,
                           }}
-                          media={
-                            <div className="ps-icon-preview-content">
-                              <ThreePreview
-                                svg={item.compositeSvg}
-                                transform={historyPreviewTransform}
-                                readOnly
-                              />
-                            </div>
-                          }
-                        />
-                      ))}
-                    </div>
-                  </ScrollArea>
-                ) : (
-                  <Text size="sm" c="dimmed">
-                    No recent icons
-                  </Text>
-                )}
+                        >
+                          {filteredHistoryItems.map((item) => (
+                            <IconPreviewTile
+                              key={item.name}
+                              className="ps-history-preview-tile"
+                              onClick={() => onIconSelect(item.path, item.name)}
+                              title={item.name}
+                              media={
+                                <div className="ps-icon-preview-content">
+                                  <ThreePreview
+                                    svg={item.compositeSvg}
+                                    transform={historyPreviewTransform}
+                                    readOnly
+                                  />
+                                </div>
+                              }
+                            />
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    ) : (
+                      <ScrollArea
+                        type="hover"
+                        scrollbars="x"
+                        style={{ width: "100%", maxWidth: "100%" }}
+                        viewportProps={{
+                          style: {
+                            overflowY: "hidden",
+                            touchAction: "pan-x",
+                          },
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "nowrap",
+                            gap: 6,
+                            width: "max-content",
+                            minWidth: "max-content",
+                            scrollSnapType: "x proximity",
+                          }}
+                        >
+                          {collapsedHistoryItems.map((item) => (
+                            <IconPreviewTile
+                              key={item.name}
+                              className="ps-history-preview-tile"
+                              onClick={() => onIconSelect(item.path, item.name)}
+                              title={item.name}
+                              style={{
+                                width: 80,
+                                flex: "0 0 auto",
+                                scrollSnapAlign: "start",
+                              }}
+                              media={
+                                <div className="ps-icon-preview-content">
+                                  <ThreePreview
+                                    svg={item.compositeSvg}
+                                    transform={historyPreviewTransform}
+                                    readOnly
+                                  />
+                                </div>
+                              }
+                            />
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    )
+                  ) : (
+                    <Text size="sm" c="dimmed">
+                      {historySearchQuery.trim()
+                        ? "No icons match this search"
+                        : "No edited icons in history"}
+                    </Text>
+                  )}
+                </Stack>
               </Tabs.Panel>
 
-              <Tabs.Panel value="presets" pt="sm">
+              <Tabs.Panel
+                value="presets"
+                style={{
+                  flex: isToolbarExpanded ? 1 : undefined,
+                  paddingTop: 8,
+                  paddingInline: TOOLBAR_INSET,
+                  paddingBottom: TOOLBAR_INSET,
+                }}
+              >
                 <Text size="sm" c="dimmed">
                   Presets coming soon...
                 </Text>
