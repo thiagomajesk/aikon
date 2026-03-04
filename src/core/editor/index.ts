@@ -65,6 +65,7 @@ export {
 export type {
   ForegroundPathSettings,
   AnimationPathSettings,
+  IconHistoryEntry,
   IconSettings,
   IconHistory,
 } from "./icon-history";
@@ -72,6 +73,7 @@ export {
   ICON_HISTORY_UPDATED_EVENT,
   ICON_ACCESSES_UPDATED_EVENT,
   loadIconHistory,
+  loadIconHistoryEntries,
   saveIconSettings,
   loadIconSettings,
   clearIconHistory,

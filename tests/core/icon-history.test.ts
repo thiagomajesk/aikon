@@ -1,42 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import "../dom-shim";
 import {
   clearIconHistory,
   ICON_ACCESSES_UPDATED_EVENT,
+  ICON_HISTORY_UPDATED_EVENT,
   loadIconHistory,
-  loadRecentIconAccesses,
+  loadIconHistoryEntries,
   loadIconSettings,
+  loadRecentIconAccesses,
   saveIconSettings,
   saveRecentIconAccess,
-  ICON_HISTORY_UPDATED_EVENT,
 } from "../../src/core/editor";
-import { defaultAnimationClip, defaultBackground, defaultForeground } from "../../src/core/editor";
-
-interface StorageLike {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-  clear(): void;
-}
-
-function createMemoryStorage(): StorageLike {
-  const store = new Map<string, string>();
-
-  return {
-    getItem(key) {
-      return store.has(key) ? store.get(key)! : null;
-    },
-    setItem(key, value) {
-      store.set(key, value);
-    },
-    removeItem(key) {
-      store.delete(key);
-    },
-    clear() {
-      store.clear();
-    },
-  };
-}
+import {
+  defaultAnimationClip,
+  defaultBackground,
+  defaultForeground,
+} from "../../src/core/editor";
 
 type Listener = (event: Event) => void;
 
@@ -61,11 +41,8 @@ function createWindowMock() {
   };
 }
 
-const localStorageMock = createMemoryStorage();
 const windowMock = createWindowMock();
-
 Object.assign(globalThis, {
-  localStorage: localStorageMock,
   window: windowMock,
 });
 
@@ -111,8 +88,35 @@ const defaultSettings = {
   animationClip: defaultAnimationClip,
 };
 
+function withMockedNow<T>(start: number, callback: () => T): T {
+  const originalDateNow = Date.now;
+  let now = start;
+  Date.now = () => {
+    now += 1;
+    return now;
+  };
+
+  try {
+    return callback();
+  } finally {
+    Date.now = originalDateNow;
+  }
+}
+
+function openHistoryDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("aikon-editor");
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      reject(request.error ?? new Error("Failed to open icon history test database."));
+    };
+  });
+}
+
 test("icon history persists and restores icon settings", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   saveIconSettings("crossbow", settings);
 
@@ -120,21 +124,36 @@ test("icon history persists and restores icon settings", () => {
   assert.deepEqual(restored, settings);
 });
 
-test("icon history keeps only the latest 10 entries", () => {
-  localStorageMock.clear();
+test("icon history stores rows ordered by latest edit timestamp", () => {
+  clearIconHistory();
 
-  for (let index = 1; index <= 11; index += 1) {
+  withMockedNow(1000, () => {
+    saveRecentIconAccess("category/icon-1.svg", "icon-1");
+    saveIconSettings("icon-1", settings);
+    saveRecentIconAccess("category/icon-2.svg", "icon-2");
+    saveIconSettings("icon-2", settings);
+  });
+
+  const entries = loadIconHistoryEntries();
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0]?.iconName, "icon-2");
+  assert.equal(entries[1]?.iconName, "icon-1");
+  assert.equal(entries[0]?.updatedAt > entries[1]?.updatedAt, true);
+});
+
+test("icon history is not capped to 10 entries in storage", () => {
+  clearIconHistory();
+
+  for (let index = 1; index <= 14; index += 1) {
     saveIconSettings(`icon-${index}`, settings);
   }
 
   const history = loadIconHistory();
-  assert.equal(Object.keys(history).length, 10);
-  assert.equal(history["icon-1"], undefined);
-  assert.notEqual(history["icon-11"], undefined);
+  assert.equal(Object.keys(history).length, 14);
 });
 
 test("saving and clearing history dispatches update events", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   let updateCount = 0;
   const listener = () => {
@@ -150,20 +169,22 @@ test("saving and clearing history dispatches update events", () => {
 });
 
 test("default settings are not persisted and reset removes existing entry", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   saveIconSettings("falcon", defaultSettings);
   assert.equal(loadIconSettings("falcon"), null);
 
+  saveRecentIconAccess("lorc/falcon.svg", "falcon");
   saveIconSettings("falcon", settings);
   assert.deepEqual(loadIconSettings("falcon"), settings);
 
   saveIconSettings("falcon", defaultSettings);
   assert.equal(loadIconSettings("falcon"), null);
+  assert.equal(loadIconHistoryEntries().find((entry) => entry.iconName === "falcon"), undefined);
 });
 
 test("foreground path settings are persisted and restored", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   saveIconSettings("hydra", {
     ...settings,
@@ -175,7 +196,7 @@ test("foreground path settings are persisted and restored", () => {
 });
 
 test("foreground path settings keep an icon entry even with default styles", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   saveIconSettings("wyrm", {
     ...defaultSettings,
@@ -188,7 +209,7 @@ test("foreground path settings keep an icon entry even with default styles", () 
 });
 
 test("animation path settings are persisted and restored", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   saveIconSettings("manticore", {
     ...settings,
@@ -200,7 +221,7 @@ test("animation path settings are persisted and restored", () => {
 });
 
 test("animation path settings keep an icon entry even with default base settings", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   saveIconSettings("chimera", {
     ...defaultSettings,
@@ -212,107 +233,16 @@ test("animation path settings keep an icon entry even with default base settings
   assert.deepEqual(restored?.animationPaths, animationPathSettings);
 });
 
-test("loadIconSettings requires persisted entries to include animation clip", () => {
-  localStorageMock.clear();
+test("saveRecentIconAccess keeps latest 100 unique paths", () => {
+  clearIconHistory();
 
-  localStorageMock.setItem(
-    "icon-history",
-    JSON.stringify({
-      incomplete: {
-        background: defaultBackground,
-        foreground: defaultForeground,
-      },
-    }),
-  );
+  withMockedNow(2000, () => {
+    for (let index = 1; index <= 101; index += 1) {
+      saveRecentIconAccess(`category/icon-${index}.svg`, `icon-${index}`);
+    }
 
-  const restored = loadIconSettings("incomplete");
-  assert.equal(restored, null);
-});
-
-test("loadIconSettings keeps explicit foreground path styles as stored", () => {
-  localStorageMock.clear();
-
-  const storedPathStyle = {
-    ...defaultForeground,
-    flatColor: "#33aaee",
-  };
-
-  localStorageMock.setItem(
-    "icon-history",
-    JSON.stringify({
-      current: {
-        background: defaultBackground,
-        foreground: defaultForeground,
-        animationClip: defaultAnimationClip,
-        foregroundPaths: {
-          enabled: true,
-          selectedPathId: "path-9",
-          pathStyles: {
-            "path-9": storedPathStyle,
-          },
-        },
-      },
-    }),
-  );
-
-  const restored = loadIconSettings("current");
-  assert.notEqual(restored?.foregroundPaths, undefined);
-  assert.deepEqual(restored?.foregroundPaths?.pathStyles["path-9"], storedPathStyle);
-});
-
-test("loadIconSettings normalizes animation path clips", () => {
-  localStorageMock.clear();
-  localStorageMock.setItem(
-    "icon-history",
-    JSON.stringify({
-      current: {
-        background: defaultBackground,
-        foreground: defaultForeground,
-        animationClip: defaultAnimationClip,
-        animationPaths: {
-          enabled: true,
-          pathClips: {
-            "path-1": {
-              preset: "pulse",
-              durationMs: 745.2,
-              ease: "",
-              loop: true,
-              alternate: true,
-              targetPathId: "path-1",
-            },
-            "path-2": {
-              preset: "none",
-              durationMs: 1200,
-              ease: "inOutSine",
-              loop: true,
-              alternate: true,
-            },
-          },
-        },
-      },
-    }),
-  );
-
-  const restored = loadIconSettings("current");
-  assert.notEqual(restored?.animationPaths, undefined);
-  assert.deepEqual(restored?.animationPaths?.pathClips["path-1"], {
-    preset: "pulse",
-    durationMs: 745,
-    ease: "inOutSine",
-    loop: true,
-    alternate: true,
+    saveRecentIconAccess("category/icon-80.svg", "icon-80");
   });
-  assert.equal(restored?.animationPaths?.pathClips["path-2"], undefined);
-});
-
-test("recent icon accesses keep latest 100 unique entries", () => {
-  localStorageMock.clear();
-
-  for (let index = 1; index <= 101; index += 1) {
-    saveRecentIconAccess(`category/icon-${index}.svg`);
-  }
-
-  saveRecentIconAccess("category/icon-80.svg");
 
   const recent = loadRecentIconAccesses();
   assert.equal(recent.length, 100);
@@ -321,7 +251,7 @@ test("recent icon accesses keep latest 100 unique entries", () => {
 });
 
 test("saving icon accesses dispatches update events", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   let updateCount = 0;
   const listener = () => {
@@ -329,38 +259,14 @@ test("saving icon accesses dispatches update events", () => {
   };
 
   windowMock.addEventListener(ICON_ACCESSES_UPDATED_EVENT, listener);
-  saveRecentIconAccess("lorc/acid-blob.svg");
+  saveRecentIconAccess("lorc/acid-blob.svg", "acid-blob");
   windowMock.removeEventListener(ICON_ACCESSES_UPDATED_EVENT, listener);
 
   assert.equal(updateCount, 1);
 });
 
-test("loadRecentIconAccesses reads values from recent-icons key only", () => {
-  localStorageMock.clear();
-  localStorageMock.setItem(
-    "recent-icons",
-    JSON.stringify(["delapouite/boar.svg"]),
-  );
-  localStorageMock.setItem(
-    "recent-icon-accesses",
-    JSON.stringify(["lorc/acid-blob.svg", 123, "cathelineau/boar.svg"]),
-  );
-
-  const recent = loadRecentIconAccesses();
-
-  assert.deepEqual(recent, ["delapouite/boar.svg"]);
-  assert.notEqual(localStorageMock.getItem("recent-icon-accesses"), null);
-  assert.notEqual(localStorageMock.getItem("recent-icons"), null);
-});
-
-test("loadRecentIconAccesses returns empty for invalid JSON payload shapes", () => {
-  localStorageMock.clear();
-  localStorageMock.setItem("recent-icons", JSON.stringify({ wrong: true }));
-  assert.deepEqual(loadRecentIconAccesses(), []);
-});
-
 test("saveRecentIconAccess ignores empty paths", () => {
-  localStorageMock.clear();
+  clearIconHistory();
 
   let updateCount = 0;
   const listener = () => {
@@ -375,41 +281,27 @@ test("saveRecentIconAccess ignores empty paths", () => {
   assert.deepEqual(loadRecentIconAccesses(), []);
 });
 
-test("icon history APIs return safe fallbacks when storage throws", () => {
-  localStorageMock.clear();
-
-  const originalGetItem = localStorageMock.getItem;
-  const originalSetItem = localStorageMock.setItem;
-  const originalRemoveItem = localStorageMock.removeItem;
-  const originalConsoleError = console.error;
-  const errors: unknown[] = [];
-
-  console.error = (...args: unknown[]) => {
-    errors.push(args);
-  };
-
-  localStorageMock.getItem = () => {
-    throw new Error("getItem failed");
-  };
-  localStorageMock.setItem = () => {
-    throw new Error("setItem failed");
-  };
-  localStorageMock.removeItem = () => {
-    throw new Error("removeItem failed");
-  };
-
-  assert.deepEqual(loadIconHistory(), {});
-  assert.equal(loadIconSettings("any"), null);
-  assert.deepEqual(loadRecentIconAccesses(), []);
-
-  saveIconSettings("shield", settings);
-  saveRecentIconAccess("lorc/acid-blob.svg");
+test("saveRecentIconAccess does not reorder edited icon timestamps", () => {
   clearIconHistory();
 
-  localStorageMock.getItem = originalGetItem;
-  localStorageMock.setItem = originalSetItem;
-  localStorageMock.removeItem = originalRemoveItem;
-  console.error = originalConsoleError;
+  withMockedNow(5000, () => {
+    saveRecentIconAccess("category/raven.svg", "raven");
+    saveIconSettings("raven", settings);
+    const before = loadIconHistoryEntries().find((entry) => entry.iconName === "raven");
+    saveRecentIconAccess("category/raven.svg", "raven");
+    const after = loadIconHistoryEntries().find((entry) => entry.iconName === "raven");
 
-  assert.equal(errors.length > 0, true);
+    assert.notEqual(before, undefined);
+    assert.notEqual(after, undefined);
+    assert.equal(before?.updatedAt, after?.updatedAt);
+  });
+});
+
+test("icon history uses the icon-history object store", async () => {
+  clearIconHistory();
+  saveIconSettings("gryphon", settings);
+
+  const database = await openHistoryDatabase();
+  assert.equal(database.objectStoreNames.contains("icon-history"), true);
+  assert.equal(database.objectStoreNames.contains("icon-edits"), false);
 });

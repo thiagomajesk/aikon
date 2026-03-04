@@ -12,11 +12,10 @@ import {
   isDefaultAnimationClipState,
   normalizeAnimationClipState,
 } from "./animation-clip";
-import { parseLocalJson, readLocalJson } from "../platform";
 
-const ICON_HISTORY_KEY = "icon-history";
-const MAX_HISTORY_SIZE = 10;
-const RECENT_ICONS_KEY = "recent-icons";
+const DB_NAME = "aikon-editor";
+const DB_VERSION = 2;
+const ICON_HISTORY_STORE = "icon-history";
 const MAX_RECENT_ICON_ACCESSES = 100;
 export const ICON_HISTORY_UPDATED_EVENT = "icon-history-updated";
 export const ICON_ACCESSES_UPDATED_EVENT = "icon-accesses-updated";
@@ -42,11 +41,39 @@ export interface IconSettings {
 
 export type IconHistory = Record<string, IconSettings>;
 
+interface StoredIconRecord {
+  iconName: string;
+  iconPath: string | null;
+  updatedAt: number;
+  settings: IconSettings | null;
+}
+
+export interface IconHistoryEntry {
+  iconName: string;
+  iconPath: string | null;
+  updatedAt: number;
+  settings: IconSettings;
+}
+
+const recordsCache = new Map<string, StoredIconRecord>();
+
+let dbPromise: Promise<IDBDatabase> | null = null;
+let hydrationPromise: Promise<void> | null = null;
+let hydrated = false;
+
 function notifyHistoryUpdated(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
   window.dispatchEvent(new Event(ICON_HISTORY_UPDATED_EVENT));
 }
 
 function notifyIconAccessesUpdated(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
   window.dispatchEvent(new Event(ICON_ACCESSES_UPDATED_EVENT));
 }
 
@@ -107,79 +134,7 @@ function normalizeAnimationPathSettings(
   };
 }
 
-/**
- * Loads all remembered icon settings from localStorage.
- * Returns an empty object when there is no saved history yet.
- */
-export function loadIconHistory(): IconHistory {
-  return readLocalJson<IconHistory>(ICON_HISTORY_KEY, {}, "Failed to load icon history:");
-}
-
-/**
- * Saves the latest settings for one icon.
- * Keeps only the most recent 10 entries to avoid unbounded localStorage growth.
- */
-export function saveIconSettings(
-  iconName: string,
-  settings: IconSettings,
-): void {
-  try {
-    const history = loadIconHistory();
-    const hasForegroundPathSettings = Boolean(settings.foregroundPaths?.enabled);
-    const normalizedAnimationClip = normalizeAnimationClipState(settings.animationClip);
-    const normalizedAnimationPaths = normalizeAnimationPathSettings(
-      settings.animationPaths,
-    );
-    const hasCustomAnimation = !isDefaultAnimationClipState(normalizedAnimationClip);
-    const hasPathAnimationSettings = Boolean(normalizedAnimationPaths?.enabled);
-
-    const isDefaultSettings =
-      isDefaultBackgroundStyle(settings.background) &&
-      isDefaultForegroundStyle(settings.foreground) &&
-      !hasForegroundPathSettings &&
-      !hasCustomAnimation &&
-      !hasPathAnimationSettings;
-
-    if (isDefaultSettings) {
-      if (!history[iconName]) {
-        return;
-      }
-
-      delete history[iconName];
-      localStorage.setItem(ICON_HISTORY_KEY, JSON.stringify(history));
-      notifyHistoryUpdated();
-      return;
-    }
-
-    const nextSettings: IconSettings = {
-      ...settings,
-      animationClip: normalizedAnimationClip,
-    };
-    if (normalizedAnimationPaths) {
-      nextSettings.animationPaths = normalizedAnimationPaths;
-    }
-
-    history[iconName] = nextSettings;
-
-    // If we exceed max size, remove the first key
-    const keys = Object.keys(history);
-    if (keys.length > MAX_HISTORY_SIZE) {
-      delete history[keys[0]];
-    }
-
-    localStorage.setItem(ICON_HISTORY_KEY, JSON.stringify(history));
-    notifyHistoryUpdated();
-  } catch (error) {
-    console.error("Failed to save icon settings:", error);
-  }
-}
-
-/**
- * Loads saved settings for a specific icon name.
- */
-export function loadIconSettings(iconName: string): IconSettings | null {
-  const history = loadIconHistory();
-  const settings = history[iconName];
+function normalizeIconSettings(settings: IconSettings): IconSettings | null {
   if (!settings || !settings.animationClip) {
     return null;
   }
@@ -203,15 +158,322 @@ export function loadIconSettings(iconName: string): IconSettings | null {
   };
 }
 
+function normalizeIconName(iconName: string | null | undefined, iconPath: string): string {
+  const trimmed = iconName?.trim();
+  if (trimmed) {
+    return trimmed;
+  }
+
+  const filename = iconPath.split("/").at(-1) ?? "";
+  return filename.replace(/\.svg$/i, "").trim();
+}
+
+function sortByMostRecent(records: StoredIconRecord[]): StoredIconRecord[] {
+  return [...records].sort((left, right) => {
+    if (right.updatedAt !== left.updatedAt) {
+      return right.updatedAt - left.updatedAt;
+    }
+
+    return left.iconName.localeCompare(right.iconName);
+  });
+}
+
+function openIconHistoryDb(): Promise<IDBDatabase> {
+  if (typeof indexedDB === "undefined") {
+    return Promise.reject(new Error("IndexedDB is unavailable in this environment."));
+  }
+
+  if (dbPromise) {
+    return dbPromise;
+  }
+
+  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(ICON_HISTORY_STORE)) {
+        database.createObjectStore(ICON_HISTORY_STORE, {
+          keyPath: "iconName",
+        });
+      }
+    };
+
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+
+    request.onerror = () => {
+      reject(request.error ?? new Error("Failed to open IndexedDB."));
+    };
+  });
+
+  return dbPromise;
+}
+
+async function readAllStoredRecords(): Promise<StoredIconRecord[]> {
+  const database = await openIconHistoryDb();
+  return await new Promise<StoredIconRecord[]>((resolve, reject) => {
+    const transaction = database.transaction(ICON_HISTORY_STORE, "readonly");
+    const store = transaction.objectStore(ICON_HISTORY_STORE);
+    const request = store.getAll();
+
+    request.onsuccess = () => {
+      const records = (request.result as unknown[])
+        .flatMap((value) => {
+          if (typeof value !== "object" || value === null) {
+            return [];
+          }
+
+          const raw = value as Partial<StoredIconRecord>;
+          if (typeof raw.iconName !== "string" || !raw.iconName.trim()) {
+            return [];
+          }
+
+          const normalizedSettings =
+            raw.settings && typeof raw.settings === "object"
+              ? normalizeIconSettings(raw.settings as IconSettings)
+              : null;
+
+          return [
+            {
+              iconName: raw.iconName,
+              iconPath: typeof raw.iconPath === "string" ? raw.iconPath : null,
+              updatedAt:
+                typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt)
+                  ? raw.updatedAt
+                  : 0,
+              settings: normalizedSettings,
+            } satisfies StoredIconRecord,
+          ];
+        });
+      resolve(records);
+    };
+
+    request.onerror = () => {
+      reject(request.error ?? new Error("Failed to read IndexedDB icon records."));
+    };
+  });
+}
+
+async function putStoredRecord(record: StoredIconRecord): Promise<void> {
+  const database = await openIconHistoryDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(ICON_HISTORY_STORE, "readwrite");
+    const store = transaction.objectStore(ICON_HISTORY_STORE);
+    const request = store.put(record);
+
+    request.onsuccess = () => {
+      resolve();
+    };
+
+    request.onerror = () => {
+      reject(request.error ?? new Error("Failed to write IndexedDB icon record."));
+    };
+  });
+}
+
+async function deleteStoredRecord(iconName: string): Promise<void> {
+  const database = await openIconHistoryDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(ICON_HISTORY_STORE, "readwrite");
+    const store = transaction.objectStore(ICON_HISTORY_STORE);
+    const request = store.delete(iconName);
+
+    request.onsuccess = () => {
+      resolve();
+    };
+
+    request.onerror = () => {
+      reject(request.error ?? new Error("Failed to delete IndexedDB icon record."));
+    };
+  });
+}
+
+async function clearStoredRecords(): Promise<void> {
+  const database = await openIconHistoryDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(ICON_HISTORY_STORE, "readwrite");
+    const store = transaction.objectStore(ICON_HISTORY_STORE);
+    const request = store.clear();
+
+    request.onsuccess = () => {
+      resolve();
+    };
+
+    request.onerror = () => {
+      reject(request.error ?? new Error("Failed to clear IndexedDB icon records."));
+    };
+  });
+}
+
+function ensureHydrated(): void {
+  if (hydrated || hydrationPromise) {
+    return;
+  }
+
+  hydrationPromise = readAllStoredRecords()
+    .then((records) => {
+      for (const record of records) {
+        const existing = recordsCache.get(record.iconName);
+        if (!existing || record.updatedAt >= existing.updatedAt) {
+          recordsCache.set(record.iconName, record);
+        }
+      }
+      hydrated = true;
+      notifyHistoryUpdated();
+      notifyIconAccessesUpdated();
+    })
+    .catch((error) => {
+      hydrated = true;
+      console.error("Failed to hydrate icon history from IndexedDB:", error);
+    })
+    .finally(() => {
+      hydrationPromise = null;
+    });
+}
+
+function listHistoryEntriesFromCache(): IconHistoryEntry[] {
+  return sortByMostRecent(Array.from(recordsCache.values()))
+    .flatMap((record) => {
+      if (!record.settings) {
+        return [];
+      }
+
+      const normalizedSettings = normalizeIconSettings(record.settings);
+      if (!normalizedSettings) {
+        return [];
+      }
+
+      return [
+        {
+          iconName: record.iconName,
+          iconPath: record.iconPath,
+          updatedAt: record.updatedAt,
+          settings: normalizedSettings,
+        } satisfies IconHistoryEntry,
+      ];
+    });
+}
+
+/**
+ * Loads all remembered icon settings.
+ * Data is hydrated from IndexedDB and mirrored in an in-memory cache.
+ */
+export function loadIconHistory(): IconHistory {
+  ensureHydrated();
+
+  const historyEntries = listHistoryEntriesFromCache();
+  return historyEntries.reduce<IconHistory>((result, entry) => {
+    result[entry.iconName] = entry.settings;
+    return result;
+  }, {});
+}
+
+/**
+ * Returns full icon history entries sorted by most recent edit first.
+ */
+export function loadIconHistoryEntries(): IconHistoryEntry[] {
+  ensureHydrated();
+  return listHistoryEntriesFromCache();
+}
+
+/**
+ * Saves the latest settings for one icon.
+ */
+export function saveIconSettings(iconName: string, settings: IconSettings): void {
+  try {
+    const existing = recordsCache.get(iconName);
+    const normalizedAnimationClip = normalizeAnimationClipState(settings.animationClip);
+    const normalizedAnimationPaths = normalizeAnimationPathSettings(
+      settings.animationPaths,
+    );
+    const hasForegroundPathSettings = Boolean(settings.foregroundPaths?.enabled);
+    const hasCustomAnimation = !isDefaultAnimationClipState(normalizedAnimationClip);
+    const hasPathAnimationSettings = Boolean(normalizedAnimationPaths?.enabled);
+
+    const isDefaultSettings =
+      isDefaultBackgroundStyle(settings.background) &&
+      isDefaultForegroundStyle(settings.foreground) &&
+      !hasForegroundPathSettings &&
+      !hasCustomAnimation &&
+      !hasPathAnimationSettings;
+
+    if (isDefaultSettings) {
+      if (!existing) {
+        return;
+      }
+
+      if (!existing.iconPath) {
+        recordsCache.delete(iconName);
+        void deleteStoredRecord(iconName).catch((error) => {
+          console.error("Failed to delete icon settings:", error);
+        });
+      } else {
+        const next: StoredIconRecord = {
+          ...existing,
+          settings: null,
+        };
+        recordsCache.set(iconName, next);
+        void putStoredRecord(next).catch((error) => {
+          console.error("Failed to update icon settings:", error);
+        });
+      }
+
+      notifyHistoryUpdated();
+      return;
+    }
+
+    const nextSettings: IconSettings = {
+      ...settings,
+      animationClip: normalizedAnimationClip,
+      ...(normalizedAnimationPaths ? { animationPaths: normalizedAnimationPaths } : {}),
+    };
+
+    const nextRecord: StoredIconRecord = {
+      iconName,
+      iconPath: existing?.iconPath ?? null,
+      updatedAt: Date.now(),
+      settings: nextSettings,
+    };
+
+    recordsCache.set(iconName, nextRecord);
+    notifyHistoryUpdated();
+
+    void putStoredRecord(nextRecord).catch((error) => {
+      console.error("Failed to save icon settings:", error);
+    });
+  } catch (error) {
+    console.error("Failed to save icon settings:", error);
+  }
+}
+
+/**
+ * Loads saved settings for a specific icon name.
+ */
+export function loadIconSettings(iconName: string): IconSettings | null {
+  ensureHydrated();
+
+  const record = recordsCache.get(iconName);
+  if (!record?.settings) {
+    return null;
+  }
+
+  return normalizeIconSettings(record.settings);
+}
+
 /**
  * Clears all saved icon history and selected icon state.
  */
 export function clearIconHistory(): void {
   try {
-    localStorage.removeItem(ICON_HISTORY_KEY);
-    localStorage.removeItem(RECENT_ICONS_KEY);
+    recordsCache.clear();
     notifyHistoryUpdated();
     notifyIconAccessesUpdated();
+
+    void clearStoredRecords().catch((error) => {
+      console.error("Failed to clear icon history:", error);
+    });
   } catch (error) {
     console.error("Failed to clear icon history:", error);
   }
@@ -221,46 +483,58 @@ export function clearIconHistory(): void {
  * Loads the latest accessed icon paths (most recent first).
  */
 export function loadRecentIconAccesses(): string[] {
-  try {
-    const stored = localStorage.getItem(RECENT_ICONS_KEY);
-    if (!stored) {
-      return [];
+  ensureHydrated();
+
+  const uniquePaths = new Set<string>();
+  const orderedPaths: string[] = [];
+
+  for (const record of sortByMostRecent(Array.from(recordsCache.values()))) {
+    if (!record.iconPath || uniquePaths.has(record.iconPath)) {
+      continue;
     }
 
-    const parsed = parseLocalJson<unknown[]>(
-      stored,
-      [],
-      "Failed to load recent icon accesses:",
-    );
-    if (!Array.isArray(parsed)) {
-      return [];
+    uniquePaths.add(record.iconPath);
+    orderedPaths.push(record.iconPath);
+
+    if (orderedPaths.length >= MAX_RECENT_ICON_ACCESSES) {
+      break;
     }
-
-    const normalized = parsed
-      .filter((value): value is string => typeof value === "string")
-      .slice(0, MAX_RECENT_ICON_ACCESSES);
-
-    return normalized;
-  } catch (error) {
-    console.error("Failed to load recent icon accesses:", error);
-    return [];
   }
+
+  return orderedPaths;
 }
 
 /**
- * Records an icon path access and keeps only the latest 100 unique paths.
+ * Records an icon path access and stores it in the icon record row.
  */
-export function saveRecentIconAccess(iconPath: string): void {
+export function saveRecentIconAccess(iconPath: string, iconName?: string | null): void {
   if (!iconPath) {
     return;
   }
 
   try {
-    const previous = loadRecentIconAccesses();
-    const deduped = previous.filter((path) => path !== iconPath);
-    const next = [iconPath, ...deduped].slice(0, MAX_RECENT_ICON_ACCESSES);
-    localStorage.setItem(RECENT_ICONS_KEY, JSON.stringify(next));
+    const resolvedIconName = normalizeIconName(iconName, iconPath);
+    if (!resolvedIconName) {
+      return;
+    }
+
+    const existing = recordsCache.get(resolvedIconName);
+    const shouldBumpTimestamp = !existing?.settings;
+    const nextRecord: StoredIconRecord = {
+      iconName: resolvedIconName,
+      iconPath,
+      updatedAt: shouldBumpTimestamp
+        ? Date.now()
+        : (existing?.updatedAt ?? Date.now()),
+      settings: existing?.settings ?? null,
+    };
+
+    recordsCache.set(resolvedIconName, nextRecord);
     notifyIconAccessesUpdated();
+
+    void putStoredRecord(nextRecord).catch((error) => {
+      console.error("Failed to save recent icon access:", error);
+    });
   } catch (error) {
     console.error("Failed to save recent icon access:", error);
   }

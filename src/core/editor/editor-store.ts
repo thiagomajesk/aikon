@@ -106,7 +106,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ selectedIconPath, selectedIconName: name });
 
     if (selectedIconPath) {
-      saveRecentIconAccess(selectedIconPath);
+      saveRecentIconAccess(selectedIconPath, name);
     }
 
     // Load settings for newly selected icon
